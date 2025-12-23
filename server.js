@@ -5,36 +5,38 @@ const bodyParser = require('body-parser');
 
 const app = express();
 
-// Разрешаем все запросы (GET, POST, PUT, DELETE)
+// Разрешаем запросы с любого источника (CORS)
 app.use(cors({ origin: '*' }));
 app.use(bodyParser.json());
 
-// Подключение к БД (данные берутся из Render Environment Variables)
+// === ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ ===
+// Переменные берутся из настроек Render (Environment Variables)
 const db = mysql.createConnection({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
     port: process.env.DB_PORT,
-    ssl: { rejectUnauthorized: false }
+    ssl: { rejectUnauthorized: false } // Обязательно для Aiven/Cloud БД
 });
 
 db.connect(err => {
-    if (err) console.error('Ошибка БД:', err);
-    else {
-        console.log('MySQL подключен!');
+    if (err) {
+        console.error('Ошибка подключения к БД:', err);
+    } else {
+        console.log('MySQL успешно подключен!');
         initTables();
     }
 });
 
-// === СОЗДАНИЕ ТАБЛИЦ ===
+// === СОЗДАНИЕ ТАБЛИЦ (Если их нет) ===
 function initTables() {
-    const tables = [
+    const queries = [
         `CREATE TABLE IF NOT EXISTS users (
             id INT AUTO_INCREMENT PRIMARY KEY,
-            username VARCHAR(255) UNIQUE,
-            password VARCHAR(255),
-            fullName VARCHAR(255)
+            username VARCHAR(255) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL,
+            fullName VARCHAR(255) NOT NULL
         )`,
         `CREATE TABLE IF NOT EXISTS tasks (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -73,28 +75,48 @@ function initTables() {
         )`
     ];
 
-    tables.forEach(sql => db.query(sql));
-    console.log('Таблицы инициализированы.');
+    queries.forEach(sql => {
+        db.query(sql, err => {
+            if (err) console.error("Ошибка инициализации таблицы:", err);
+        });
+    });
+    console.log('Таблицы проверены/созданы.');
 }
 
-// === АВТОРИЗАЦИЯ ===
+// ================= МАРШРУТЫ API =================
+
+// 1. РЕГИСТРАЦИЯ И ВХОД
 app.post('/register', (req, res) => {
     const { username, password, fullName } = req.body;
-    db.query('INSERT INTO users (username, password, fullName) VALUES (?, ?, ?)', 
-        [username, password, fullName], 
-        (err) => err ? res.status(500).json({error: err}) : res.json({message: 'OK'})
-    );
+    if (!username || !password || !fullName) return res.status(400).json({message: 'Все поля обязательны'});
+    
+    const sql = 'INSERT INTO users (username, password, fullName) VALUES (?, ?, ?)';
+    db.query(sql, [username, password, fullName], (err) => {
+        if (err) return res.status(500).json({ message: 'Ошибка регистрации (логин занят?)' });
+        res.status(201).json({ message: 'Пользователь создан' });
+    });
 });
 
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
-    db.query('SELECT * FROM users WHERE username = ? AND password = ?', [username, password], (err, result) => {
-        if (err || result.length === 0) return res.status(401).json({message: 'Ошибка входа'});
-        res.json(result[0]);
+    const sql = 'SELECT * FROM users WHERE username = ? AND password = ?';
+    db.query(sql, [username, password], (err, results) => {
+        if (err || results.length === 0) return res.status(401).json({ message: 'Неверный логин или пароль' });
+        res.json(results[0]);
     });
 });
 
-// === ЗАДАЧИ (Личные) ===
+// 2. СПИСОК УЧАСТНИКОВ (Для вкладки "Участники")
+app.get('/api/users', (req, res) => {
+    // Возвращаем только имена и логины, без паролей
+    const sql = 'SELECT id, fullName, username FROM users ORDER BY fullName ASC';
+    db.query(sql, (err, data) => {
+        if (err) return res.status(500).json({ error: 'Ошибка сервера' });
+        res.json(data);
+    });
+});
+
+// 3. ЛИЧНЫЕ ЗАДАЧИ
 app.get('/api/tasks', (req, res) => {
     const userId = req.query.userId;
     db.query('SELECT * FROM tasks WHERE user_id = ? ORDER BY id DESC', [userId], (err, data) => res.json(data || []));
@@ -103,22 +125,22 @@ app.get('/api/tasks', (req, res) => {
 app.post('/api/tasks', (req, res) => {
     const { userId, text } = req.body;
     db.query('INSERT INTO tasks (user_id, text) VALUES (?, ?)', [userId, text], (err, result) => {
+        if(err) return res.status(500).json({error: err});
         res.json({ id: result.insertId, text, is_done: 0 });
     });
 });
 
 app.put('/api/tasks/:id', (req, res) => {
-    // Переключение статуса (сделано/не сделано)
-    db.query('UPDATE tasks SET is_done = NOT is_done WHERE id = ?', [req.params.id], () => res.json({status: 'ok'}));
+    db.query('UPDATE tasks SET is_done = NOT is_done WHERE id = ?', [req.params.id], () => res.json({status: 'updated'}));
 });
 
 app.delete('/api/tasks/:id', (req, res) => {
-    db.query('DELETE FROM tasks WHERE id = ?', [req.params.id], () => res.json({status: 'ok'}));
+    db.query('DELETE FROM tasks WHERE id = ?', [req.params.id], () => res.json({status: 'deleted'}));
 });
 
-// === ЧАТ (Общий) ===
+// 4. ЧАТ
 app.get('/api/chat', (req, res) => {
-    // Берем последние 50 сообщений
+    // Берем последние 50 сообщений, сортируем по времени
     db.query('SELECT * FROM chat ORDER BY created_at ASC LIMIT 50', (err, data) => res.json(data || []));
 });
 
@@ -127,20 +149,20 @@ app.post('/api/chat', (req, res) => {
     db.query('INSERT INTO chat (username, message) VALUES (?, ?)', [username, message], () => res.json({status: 'ok'}));
 });
 
-// === ОБЩИЕ СПИСКИ (Домашка, Новости, События, Вопросы) ===
-// Универсальная функция для GET запросов
-const createGetRoute = (path, table) => {
-    app.get(path, (req, res) => {
+// 5. ОБЩИЕ СПИСКИ (Домашка, Новости и т.д.)
+// Универсальный GET
+const createGet = (route, table) => {
+    app.get(route, (req, res) => {
         db.query(`SELECT * FROM ${table} ORDER BY id DESC LIMIT 20`, (err, data) => res.json(data || []));
     });
 };
 
-createGetRoute('/api/homework', 'homework');
-createGetRoute('/api/news', 'news');
-createGetRoute('/api/events', 'events');
-createGetRoute('/api/feedback', 'feedback');
+createGet('/api/homework', 'homework');
+createGet('/api/news', 'news');
+createGet('/api/events', 'events');
+createGet('/api/feedback', 'feedback');
 
-// Обработка POST запросов для списков
+// POST запросы
 app.post('/api/homework', (req, res) => {
     const { subject, task, deadline } = req.body;
     db.query('INSERT INTO homework (subject, task, deadline) VALUES (?, ?, ?)', [subject, task, deadline], () => res.json({status:'ok'}));
@@ -161,5 +183,6 @@ app.post('/api/feedback', (req, res) => {
     db.query('INSERT INTO feedback (category, subject, message) VALUES (?, ?, ?)', [category, subject, message], () => res.json({status:'ok'}));
 });
 
+// Запуск сервера
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
