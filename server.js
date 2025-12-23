@@ -5,19 +5,18 @@ const bodyParser = require('body-parser');
 
 const app = express();
 
-// Разрешаем запросы с любого источника (CORS)
+
 app.use(cors({ origin: '*' }));
 app.use(bodyParser.json());
 
-// === ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ ===
-// Переменные берутся из настроек Render (Environment Variables)
+
 const db = mysql.createConnection({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
     port: process.env.DB_PORT,
-    ssl: { rejectUnauthorized: false } // Обязательно для Aiven/Cloud БД
+    ssl: { rejectUnauthorized: false } 
 });
 
 db.connect(err => {
@@ -29,7 +28,6 @@ db.connect(err => {
     }
 });
 
-// === СОЗДАНИЕ ТАБЛИЦ (Если их нет) ===
 function initTables() {
     const queries = [
         `CREATE TABLE IF NOT EXISTS users (
@@ -83,9 +81,8 @@ function initTables() {
     console.log('Таблицы проверены/созданы.');
 }
 
-// ================= МАРШРУТЫ API =================
 
-// 1. РЕГИСТРАЦИЯ И ВХОД
+
 app.post('/register', (req, res) => {
     const { username, password, fullName } = req.body;
     if (!username || !password || !fullName) return res.status(400).json({message: 'Все поля обязательны'});
@@ -106,9 +103,9 @@ app.post('/login', (req, res) => {
     });
 });
 
-// 2. СПИСОК УЧАСТНИКОВ (Для вкладки "Участники")
+
 app.get('/api/users', (req, res) => {
-    // Возвращаем только имена и логины, без паролей
+
     const sql = 'SELECT id, fullName, username FROM users ORDER BY fullName ASC';
     db.query(sql, (err, data) => {
         if (err) return res.status(500).json({ error: 'Ошибка сервера' });
@@ -116,7 +113,7 @@ app.get('/api/users', (req, res) => {
     });
 });
 
-// 3. ЛИЧНЫЕ ЗАДАЧИ
+
 app.get('/api/tasks', (req, res) => {
     const userId = req.query.userId;
     db.query('SELECT * FROM tasks WHERE user_id = ? ORDER BY id DESC', [userId], (err, data) => res.json(data || []));
@@ -138,9 +135,9 @@ app.delete('/api/tasks/:id', (req, res) => {
     db.query('DELETE FROM tasks WHERE id = ?', [req.params.id], () => res.json({status: 'deleted'}));
 });
 
-// 4. ЧАТ
+
 app.get('/api/chat', (req, res) => {
-    // Берем последние 50 сообщений, сортируем по времени
+
     db.query('SELECT * FROM chat ORDER BY created_at ASC LIMIT 50', (err, data) => res.json(data || []));
 });
 
@@ -149,8 +146,6 @@ app.post('/api/chat', (req, res) => {
     db.query('INSERT INTO chat (username, message) VALUES (?, ?)', [username, message], () => res.json({status: 'ok'}));
 });
 
-// 5. ОБЩИЕ СПИСКИ (Домашка, Новости и т.д.)
-// Универсальный GET
 const createGet = (route, table) => {
     app.get(route, (req, res) => {
         db.query(`SELECT * FROM ${table} ORDER BY id DESC LIMIT 20`, (err, data) => res.json(data || []));
@@ -162,7 +157,7 @@ createGet('/api/news', 'news');
 createGet('/api/events', 'events');
 createGet('/api/feedback', 'feedback');
 
-// POST запросы
+
 app.post('/api/homework', (req, res) => {
     const { subject, task, deadline } = req.body;
     db.query('INSERT INTO homework (subject, task, deadline) VALUES (?, ?, ?)', [subject, task, deadline], () => res.json({status:'ok'}));
@@ -183,6 +178,43 @@ app.post('/api/feedback', (req, res) => {
     db.query('INSERT INTO feedback (category, subject, message) VALUES (?, ?, ?)', [category, subject, message], () => res.json({status:'ok'}));
 });
 
-// Запуск сервера
+// === ОПАСНАЯ ЗОНА: ОЧИСТКА БАЗЫ ===
+app.get('/danger/clear-database', (req, res) => {
+
+    const sql = `
+        SET FOREIGN_KEY_CHECKS = 0;
+        DROP TABLE IF EXISTS users;
+        DROP TABLE IF EXISTS tasks;
+        DROP TABLE IF EXISTS chat;
+        DROP TABLE IF EXISTS homework;
+        DROP TABLE IF EXISTS news;
+        DROP TABLE IF EXISTS events;
+        DROP TABLE IF EXISTS feedback;
+        SET FOREIGN_KEY_CHECKS = 1;
+    `;
+    
+    const tables = ['users', 'tasks', 'chat', 'homework', 'news', 'events', 'feedback'];
+    
+
+    let completed = 0;
+
+    db.query('SET FOREIGN_KEY_CHECKS = 0', () => {
+        tables.forEach(table => {
+            db.query(`DROP TABLE IF EXISTS ${table}`, () => {
+                completed++;
+                if (completed === tables.length) {
+                    
+                    db.query('SET FOREIGN_KEY_CHECKS = 1', () => {
+                        console.log('База данных очищена!');
+                        
+                        initTables(); 
+                        res.send('База данных полностью очищена и пересоздана. Можно регистрироваться заново.');
+                    });
+                }
+            });
+        });
+    });
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
